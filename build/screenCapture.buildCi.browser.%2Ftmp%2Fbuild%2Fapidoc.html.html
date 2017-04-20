@@ -1,0 +1,381 @@
+<html><head></head><body><div class="apidocDiv">
+<style>
+/*csslint
+*/
+.apidocDiv {
+    background: #fff;
+    font-family: Arial, Helvetica, sans-serif;
+}
+.apidocDiv a[href] {
+    color: #33f;
+    font-weight: bold;
+    text-decoration: none;
+}
+.apidocDiv a[href]:hover {
+    text-decoration: underline;
+}
+.apidocCodeCommentSpan {
+    background: #bbf;
+    color: #000;
+    display: block;
+}
+.apidocCodeKeywordSpan {
+    color: #d00;
+    font-weight: bold;
+}
+.apidocCodePre {
+    background: #eef;
+    border: 1px solid;
+    color: #777;
+    padding: 5px;
+    white-space: pre-wrap;
+}
+.apidocFooterDiv {
+    margin-top: 20px;
+    text-align: center;
+}
+.apidocModuleLi {
+    margin-top: 10px;
+}
+.apidocSectionDiv {
+    border-top: 1px solid;
+    margin-top: 20px;
+}
+.apidocSignatureSpan {
+    color: #777;
+    font-weight: bold;
+}
+</style>
+<h1>api documentation for
+    <a href="https://github.com/mafintosh/tar-fs">tar-fs (v1.15.2)</a>
+</h1>
+<h4>filesystem bindings for tar-stream</h4>
+<div class="apidocSectionDiv"><a href="#apidoc.tableOfContents" id="apidoc.tableOfContents"><h1>table of contents</h1></a><ol>
+
+    <li class="apidocModuleLi"><a href="#apidoc.module.tar-fs">module tar-fs</a><ol>
+
+        <li>
+
+            <a class="apidocElementLiA" href="#apidoc.element.tar-fs.extract">
+            function <span class="apidocSignatureSpan">tar-fs.</span>extract
+            <span class="apidocSignatureSpan">(cwd, opts)</span>
+            </a>
+
+        </li>
+
+        <li>
+
+            <a class="apidocElementLiA" href="#apidoc.element.tar-fs.pack">
+            function <span class="apidocSignatureSpan">tar-fs.</span>pack
+            <span class="apidocSignatureSpan">(cwd, opts)</span>
+            </a>
+
+        </li>
+
+    </ol></li>
+
+</ol></div>
+
+<div class="apidocSectionDiv">
+<h1><a href="#apidoc.module.tar-fs" id="apidoc.module.tar-fs">module tar-fs</a></h1>
+
+
+    <h2>
+        <a href="#apidoc.element.tar-fs.extract" id="apidoc.element.tar-fs.extract">
+        function <span class="apidocSignatureSpan">tar-fs.</span>extract
+        <span class="apidocSignatureSpan">(cwd, opts)</span>
+        </a>
+    </h2>
+    <ul>
+    <li>description and source-code<pre class="apidocCodePre">extract = function (cwd, opts) {
+  if (!cwd) cwd = '.'
+  if (!opts) opts = {}
+
+  var xfs = opts.fs || fs
+  var ignore = opts.ignore || opts.filter || noop
+  var map = opts.map || noop
+  var mapStream = opts.mapStream || echo
+  var own = opts.chown !== false &amp;&amp; !win32 &amp;&amp; processGetuid() === 0
+  var extract = opts.extract || tar.extract()
+  var stack = []
+  var now = new Date()
+  var umask = typeof opts.umask === 'number' ? ~opts.umask : ~processUmask()
+  var dmode = typeof opts.dmode === 'number' ? opts.dmode : 0
+  var fmode = typeof opts.fmode === 'number' ? opts.fmode : 0
+  var strict = opts.strict !== false
+
+  if (opts.strip) map = strip(map, opts.strip)
+
+  if (opts.readable) {
+    dmode |= parseInt(555, 8)
+    fmode |= parseInt(444, 8)
+  }
+  if (opts.writable) {
+    dmode |= parseInt(333, 8)
+    fmode |= parseInt(222, 8)
+  }
+
+  var utimesParent = function (name, cb) { // we just set the mtime on the parent dir again everytime we write an entry
+    var top
+    while ((top = head(stack)) &amp;&amp; name.slice(0, top[0].length) !== top[0]) stack.pop()
+    if (!top) return cb()
+    xfs.utimes(top[0], now, top[1], cb)
+  }
+
+  var utimes = function (name, header, cb) {
+    if (opts.utimes === false) return cb()
+
+    if (header.type === 'directory') return xfs.utimes(name, now, header.mtime, cb)
+    if (header.type === 'symlink') return utimesParent(name, cb) // TODO: how to set mtime on link?
+
+    xfs.utimes(name, now, header.mtime, function (err) {
+      if (err) return cb(err)
+      utimesParent(name, cb)
+    })
+  }
+
+  var chperm = function (name, header, cb) {
+    var link = header.type === 'symlink'
+    var chmod = link ? xfs.lchmod : xfs.chmod
+    var chown = link ? xfs.lchown : xfs.chown
+
+    if (!chmod) return cb()
+
+    var mode = (header.mode | (header.type === 'directory' ? dmode : fmode)) &amp; umask
+    chmod(name, mode, function (err) {
+      if (err) return cb(err)
+      if (!own) return cb()
+      if (!chown) return cb()
+      chown(name, header.uid, header.gid, cb)
+    })
+  }
+
+  extract.on('entry', function (header, stream, next) {
+    header = map(header) || header
+    header.name = normalize(header.name)
+    var name = path.join(cwd, path.join('/', header.name))
+
+    if (ignore(name, header)) {
+      stream.resume()
+      return next()
+    }
+
+    var stat = function (err) {
+      if (err) return next(err)
+      utimes(name, header, function (err) {
+        if (err) return next(err)
+        if (win32) return next()
+        chperm(name, header, next)
+      })
+    }
+
+    var onsymlink = function () {
+      if (win32) return next() // skip symlinks on win for now before it can be tested
+      xfs.unlink(name, function () {
+        xfs.symlink(header.linkname, name, stat)
+      })
+    }
+
+    var onlink = function () {
+      if (win32) return next() // skip links on win for now before it can be tested
+      xfs.unlink(name, function () {
+        var srcpath = path.resolve(cwd, header.linkname)
+
+        xfs.link(srcpath, name, function (err) {
+          if (err &amp;&amp; err.code === 'EPERM' &amp;&amp; opts.hardlinkAsFilesFallback) {
+            stream = xfs.createReadStream(srcpath)
+            return onfile()
+          }
+
+          stat(err)
+        })
+      })
+    }
+
+    var onfile = function () {
+      var ws = xfs.createWriteStream(name)
+      var rs = mapStream(stream, header)
+
+      ws.on('error', function (err) { // always forward errors on destroy
+        rs.destroy(err)
+      })
+
+      pump(rs, ws, function (err) {
+        if (err) return next(err)
+        ws.on('close', stat)
+      })
+    }
+
+    if (header.type === 'directory') {
+      stack.push([name, header.mtime])
+      return mkdirfix(name, {
+        fs: xfs, own: own, uid: header.uid, gid: header.gid
+      }, stat)
+    }
+
+    mkdirfix(path.dirname(name), {
+      fs: xfs, own: own, uid: header.uid, gid: header.gid
+    }, function (err) {
+      if (err) return next(err)
+
+      switch (header.type) {
+        case 'file': return onfile()
+        case 'link': return onlink()
+        case 'symlink': return onsymlink()
+      }
+
+      if (strict) return next(new Error('unsupported type for ' ...</pre></li>
+    <li>example usage<pre class="apidocCodePre">...
+var tar = require('tar-fs')
+var fs = require('fs')
+
+// packing a directory
+tar.pack('./my-directory').pipe(fs.createWriteStream('my-tarball.tar'))
+
+// extracting a directory
+fs.createReadStream('my-other-tarball.tar').pipe(tar.<span class="apidocCodeKeywordSpan">extract</span>('./my-other
+-directory'))
+```
+
+To ignore various files when packing or extracting add a ignore function to the options. `ignore`
+is also an alias for `filter`. Additionally you get `header` if you use ignore while extracting.
+That way you could also filter by metadata.
+
+``` js
+...</pre></li>
+    </ul>
+
+
+
+    <h2>
+        <a href="#apidoc.element.tar-fs.pack" id="apidoc.element.tar-fs.pack">
+        function <span class="apidocSignatureSpan">tar-fs.</span>pack
+        <span class="apidocSignatureSpan">(cwd, opts)</span>
+        </a>
+    </h2>
+    <ul>
+    <li>description and source-code<pre class="apidocCodePre">pack = function (cwd, opts) {
+  if (!cwd) cwd = '.'
+  if (!opts) opts = {}
+
+  var xfs = opts.fs || fs
+  var ignore = opts.ignore || opts.filter || noop
+  var map = opts.map || noop
+  var mapStream = opts.mapStream || echo
+  var statNext = statAll(xfs, opts.dereference ? xfs.stat : xfs.lstat, cwd, ignore, opts.entries, opts.sort)
+  var strict = opts.strict !== false
+  var umask = typeof opts.umask === 'number' ? ~opts.umask : ~processUmask()
+  var dmode = typeof opts.dmode === 'number' ? opts.dmode : 0
+  var fmode = typeof opts.fmode === 'number' ? opts.fmode : 0
+  var pack = opts.pack || tar.pack()
+
+  if (opts.strip) map = strip(map, opts.strip)
+
+  if (opts.readable) {
+    dmode |= parseInt(555, 8)
+    fmode |= parseInt(444, 8)
+  }
+  if (opts.writable) {
+    dmode |= parseInt(333, 8)
+    fmode |= parseInt(222, 8)
+  }
+
+  var onsymlink = function (filename, header) {
+    xfs.readlink(path.join(cwd, filename), function (err, linkname) {
+      if (err) return pack.destroy(err)
+      header.linkname = normalize(linkname)
+      pack.entry(header, onnextentry)
+    })
+  }
+
+  var onstat = function (err, filename, stat) {
+    if (err) return pack.destroy(err)
+    if (!filename) return pack.finalize()
+
+    if (stat.isSocket()) return onnextentry() // tar does not support sockets...
+
+    var header = {
+      name: normalize(filename),
+      mode: (stat.mode | (stat.isDirectory() ? dmode : fmode)) &amp; umask,
+      mtime: stat.mtime,
+      size: stat.size,
+      type: 'file',
+      uid: stat.uid,
+      gid: stat.gid
+    }
+
+    if (stat.isDirectory()) {
+      header.size = 0
+      header.type = 'directory'
+      header = map(header) || header
+      return pack.entry(header, onnextentry)
+    }
+
+    if (stat.isSymbolicLink()) {
+      header.size = 0
+      header.type = 'symlink'
+      header = map(header) || header
+      return onsymlink(filename, header)
+    }
+
+    // TODO: add fifo etc...
+
+    header = map(header) || header
+
+    if (!stat.isFile()) {
+      if (strict) return pack.destroy(new Error('unsupported type for ' + filename))
+      return onnextentry()
+    }
+
+    var entry = pack.entry(header, onnextentry)
+    if (!entry) return
+
+    var rs = mapStream(xfs.createReadStream(path.join(cwd, filename)), header)
+
+    rs.on('error', function (err) { // always forward errors on destroy
+      entry.destroy(err)
+    })
+
+    pump(rs, entry)
+  }
+
+  var onnextentry = function (err) {
+    if (err) return pack.destroy(err)
+    statNext(onstat)
+  }
+
+  onnextentry()
+
+  return pack
+}</pre></li>
+    <li>example usage<pre class="apidocCodePre">...
+It doesn't gunzip for you, so if you want to extract a `.tar.gz` with this you'll need to use something like [gunzip-maybe
+](https://github.com/mafintosh/gunzip-maybe) in addition to this.
+
+``` js
+var tar = require('tar-fs')
+var fs = require('fs')
+
+// packing a directory
+tar.<span class="apidocCodeKeywordSpan">pack</span>('./my-directory').pipe(fs.createWriteStream('my-tarball.tar&amp;#
+x27;))
+
+// extracting a directory
+fs.createReadStream('my-other-tarball.tar').pipe(tar.extract('./my-other-directory'))
+```
+
+To ignore various files when packing or extracting add a ignore function to the options. `ignore`
+is also an alias for `filter`. Additionally you get `header` if you use ignore while extracting.
+...</pre></li>
+    </ul>
+
+
+</div>
+
+<div class="apidocFooterDiv">
+    [ this document was created with
+    <a href="https://github.com/kaizhu256/node-utility2" target="_blank">utility2</a>
+    ]
+</div>
+</div>
+</body></html>
